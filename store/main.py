@@ -23,9 +23,6 @@ from config import (
     POSTGRES_USER,
     POSTGRES_PASSWORD,
 )
-
-# FastAPI app setup
-app = FastAPI()
 # SQLAlchemy setup
 DATABASE_URL = f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 engine = create_engine(DATABASE_URL)
@@ -95,6 +92,8 @@ class ProcessedAgentData(BaseModel):
     road_state: str
     agent_data: AgentData
 
+# FastAPI app setup
+app = FastAPI()
 
 # WebSocket subscriptions
 subscriptions: Dict[int, Set[WebSocket]] = {}
@@ -121,47 +120,97 @@ async def send_data_to_subscribers(user_id: int, data):
             await websocket.send_json(json.dumps(data))
 
 
-# FastAPI CRUDL endpoints
-
+# FastAPI CRUDL endpoints!!!
 
 @app.post("/processed_agent_data/")
 async def create_processed_agent_data(data: List[ProcessedAgentData]):
-    # Insert data to database
-    # Send data to subscribers
-    pass
+    if not data:
+        return
+
+    flatten_data = [
+        {
+            "road_state": p_agent_data.road_state,
+            "user_id": p_agent_data.agent_data.user_id,
+            "x": p_agent_data.agent_data.accelerometer.x,
+            "y": p_agent_data.agent_data.accelerometer.y,
+            "z": p_agent_data.agent_data.accelerometer.z,
+            "latitude": p_agent_data.agent_data.gps.latitude,
+            "longitude": p_agent_data.agent_data.gps.longitude,
+            "timestamp": p_agent_data.agent_data.timestamp,
+        }
+        for p_agent_data in data
+    ]
+
+    with SessionLocal() as session:
+        try:
+            session.bulk_insert_mappings(ProcessedAgentData, flatten_data)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Failed to insert data") from e
+
+        # Send new data to subscribers
+        user_id = data[0].agent_data.user_id
+        await send_data_to_subscribers(
+            user_id,
+            [{**d, "timestamp": d["timestamp"].isoformat()} for d in flatten_data],
+        )
 
 
-@app.get(
-    "/processed_agent_data/{processed_agent_data_id}",
-    response_model=ProcessedAgentDataInDB,
-)
+@app.get("/processed_agent_data/{processed_agent_data_id}", response_model=ProcessedAgentDataInDB)
 def read_processed_agent_data(processed_agent_data_id: int):
-    # Get data by id
-    pass
+    with SessionLocal() as session:
+        result = session.query(ProcessedAgentData).filter(ProcessedAgentData.id == processed_agent_data_id).first()
+        if not result:
+            raise HTTPException(status_code=404, detail="ProcessedAgentData not found")
+        return result
 
 
 @app.get("/processed_agent_data/", response_model=list[ProcessedAgentDataInDB])
 def list_processed_agent_data():
-    # Get list of data
-    pass
+    with SessionLocal() as session:
+        return session.query(ProcessedAgentData).all()
 
 
-@app.put(
-    "/processed_agent_data/{processed_agent_data_id}",
-    response_model=ProcessedAgentDataInDB,
-)
+@app.put("/processed_agent_data/{processed_agent_data_id}", response_model=ProcessedAgentDataInDB)
 def update_processed_agent_data(processed_agent_data_id: int, data: ProcessedAgentData):
-    # Update data
-    pass
+    agent_data = data.agent_data
+    update_values = {
+        "road_state": data.road_state,
+        "user_id": agent_data.user_id,
+        "x": agent_data.accelerometer.x,
+        "y": agent_data.accelerometer.y,
+        "z": agent_data.accelerometer.z,
+        "latitude": agent_data.gps.latitude,
+        "longitude": agent_data.gps.longitude,
+        "timestamp": agent_data.timestamp,
+    }
+    with SessionLocal() as session:
+        try:
+            result = session.query(ProcessedAgentData).filter(ProcessedAgentData.id == processed_agent_data_id) \
+                .update(update_values, synchronize_session=False)
+            session.commit()
+            if not result:
+                raise HTTPException(status_code=404, detail="ProcessedAgentData not found")
+            return result
+        except Exception as e:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Failed to update data") from e
 
 
-@app.delete(
-    "/processed_agent_data/{processed_agent_data_id}",
-    response_model=ProcessedAgentDataInDB,
-)
+@app.delete("/processed_agent_data/{processed_agent_data_id}", response_model=ProcessedAgentDataInDB)
 def delete_processed_agent_data(processed_agent_data_id: int):
-    # Delete by id
-    pass
+    with SessionLocal() as session:
+        try:
+            result = session.query(ProcessedAgentData).filter(ProcessedAgentData.id == processed_agent_data_id) \
+                .delete(synchronize_session=False)
+            session.commit()
+            if not result:
+                raise HTTPException(status_code=404, detail="ProcessedAgentData not found")
+            return result
+        except Exception as e:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Failed to delete data") from e
 
 
 if __name__ == "__main__":
